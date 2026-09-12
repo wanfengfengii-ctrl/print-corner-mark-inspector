@@ -212,3 +212,75 @@ test.describe('点选检测区查看像素级证据', () => {
     await expect(page.getByTestId('zone-top-right')).toHaveCount(0);
   });
 });
+
+test.describe('选区保持、键盘反馈与窄屏适配', () => {
+  test('再次点选同一检测卡片，当前方位证据保持可见', async ({ page }) => {
+    await upload(page, 'almost.png', almostPng);
+    await page.getByTestId('zone-top-right').click();
+    const review = page.getByTestId('review');
+    await expect(review).toBeVisible();
+    await expect(review).toContainText('右上');
+
+    // 再次点选同一卡片：审阅区不消失，证据保持
+    await page.getByTestId('zone-top-right').click();
+    await expect(review).toBeVisible();
+    await expect(review).toContainText('右上');
+    await expect(page.getByTestId('review-gap-bounds')).toHaveText(
+      '缺口范围：x 976–1007，y 41–47（未命中 205 像素）',
+    );
+    await expect(page.getByTestId('review-crop')).toBeVisible();
+
+    // 预览框点选同样保持选中
+    await page.getByTestId('zone-box-top-right').click();
+    await expect(review).toBeVisible();
+    await expect(review).toContainText('右上');
+  });
+
+  test('键盘回车打开证据后焦点进入审阅区，审阅区为实时播报区域', async ({ page }) => {
+    await upload(page, 'almost.png', almostPng);
+
+    await page.getByTestId('zone-top-right').focus();
+    await page.keyboard.press('Enter');
+
+    const review = page.getByTestId('review');
+    await expect(review).toBeVisible();
+    // 焦点移入审阅区，且审阅区作为 aria-live 区域向读屏播报新内容
+    await expect(review).toBeFocused();
+    await expect(review).toHaveAttribute('aria-live', 'polite');
+
+    // 键盘切换到另一方位，焦点随更新后的审阅区移动
+    await page.getByTestId('zone-top-left').focus();
+    await page.keyboard.press('Enter');
+    await expect(review).toBeFocused();
+    await expect(review).toContainText('左上');
+  });
+
+  test('280px 窄屏下裁片完整适配审阅容器，页面无横向溢出', async ({ page }) => {
+    await page.setViewportSize({ width: 280, height: 800 });
+    await upload(page, 'almost.png', almostPng);
+    await page.getByTestId('zone-top-right').click();
+
+    const cropBox = await page.getByTestId('review-crop').boundingBox();
+    const reviewBox = await page.getByTestId('review').boundingBox();
+    expect(cropBox).not.toBeNull();
+    expect(reviewBox).not.toBeNull();
+    // 裁片完整落在审阅容器内，且保持正方形
+    expect(cropBox!.x).toBeGreaterThanOrEqual(reviewBox!.x);
+    expect(cropBox!.x + cropBox!.width).toBeLessThanOrEqual(reviewBox!.x + reviewBox!.width + 0.5);
+    expect(Math.abs(cropBox!.width - cropBox!.height)).toBeLessThanOrEqual(1);
+
+    // 页面整体无横向溢出
+    const scrollWidth = await page.evaluate(() => document.documentElement.scrollWidth);
+    expect(scrollWidth).toBeLessThanOrEqual(280);
+  });
+
+  test('宽屏下裁片保持 256px 最近邻放大展示', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await upload(page, 'almost.png', almostPng);
+    await page.getByTestId('zone-top-right').click();
+    const cropBox = await page.getByTestId('review-crop').boundingBox();
+    expect(cropBox).not.toBeNull();
+    expect(cropBox!.width).toBe(256);
+    expect(cropBox!.height).toBe(256);
+  });
+});

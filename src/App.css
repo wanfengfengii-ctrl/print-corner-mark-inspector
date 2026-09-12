@@ -42,6 +42,11 @@ h1 {
   font-weight: 600;
 }
 
+.upload input[type='file'] {
+  /* 文件选择控件固有宽度较宽，窄屏下收缩到容器可用宽度，避免横向溢出 */
+  max-width: 100%;
+}
+
 .file-name {
   color: #52606d;
   font-size: 13px;
@@ -144,7 +149,8 @@ h1 {
   grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
   gap: 12px;
   flex: 1;
-  min-width: 260px;
+  /* 窄屏（如 280px 宽页面）下收缩到容器可用宽度，不引发横向溢出 */
+  min-width: min(260px, 100%);
 }
 
 .zone-card {
@@ -222,6 +228,12 @@ h1 {
   background: #fff;
 }
 
+/* 键盘打开证据后焦点移入审阅区，给出可见焦点指示 */
+.review:focus-visible {
+  outline: 2px solid #2f80ed;
+  outline-offset: 2px;
+}
+
 .review h2 {
   font-size: 16px;
   margin: 0 0 12px;
@@ -236,12 +248,16 @@ h1 {
 
 .review-crop-wrap {
   margin: 0;
+  /* 裁片目标宽度 256px；窄屏时随审阅容器收缩，避免横向溢出 */
+  width: 256px;
+  max-width: 100%;
 }
 
 .review-crop {
   display: block;
-  width: 256px;
-  height: 256px;
+  width: 100%;
+  /* 高度跟随画布固有比例（32×32），保持正方形不变形 */
+  height: auto;
   image-rendering: pixelated;
   image-rendering: crisp-edges;
   border: 1px solid #d9e2ec;
@@ -250,7 +266,6 @@ h1 {
 
 .review-crop-wrap figcaption {
   margin-top: 8px;
-  width: 256px;
   font-size: 12px;
   color: #52606d;
   line-height: 1.6;
@@ -258,7 +273,7 @@ h1 {
 
 .review-detail {
   flex: 1;
-  min-width: 260px;
+  min-width: min(260px, 100%);
 }
 
 .review-bounds {
@@ -273,7 +288,8 @@ h1 {
   margin: 0;
   padding: 0;
   display: grid;
-  grid-template-columns: repeat(2, minmax(120px, 1fr));
+  /* 轨道可收缩到内容以下，窄屏不撑破审阅容器 */
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
   font-variant-numeric: tabular-nums;
   font-size: 14px;

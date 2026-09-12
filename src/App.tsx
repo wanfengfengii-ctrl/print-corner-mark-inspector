@@ -99,6 +99,16 @@ export default function App() {
   const pixelsRef = useRef<Uint8ClampedArray | null>(null);
   // 单调递增序号，防止连续上传时旧异步结果覆盖新状态
   const requestSeq = useRef(0);
+  // 审阅区容器：键盘打开证据后把焦点移入，让键盘与读屏用户感知新内容出现
+  const reviewRef = useRef<HTMLElement | null>(null);
+  // 单调递增的聚焦请求序号；键盘激活选区时递增，渲染完成后由副作用执行聚焦
+  const [reviewFocusTick, setReviewFocusTick] = useState(0);
+
+  // 键盘打开/切换证据后，待审阅区渲染完成再把焦点移入（鼠标点选不抢焦点）
+  useEffect(() => {
+    if (reviewFocusTick === 0) return;
+    reviewRef.current?.focus();
+  }, [reviewFocusTick]);
 
   const clearResult = () => {
     setAnalysis(null);
@@ -186,7 +196,14 @@ export default function App() {
   const missing = analysis?.zones.filter((z) => !z.present) ?? [];
   const selected = analysis?.zones.find((z) => z.zone.id === selectedId) ?? null;
 
-  const selectZone = (id: ZoneId) => setSelectedId((current) => (current === id ? null : id));
+  // 粘性选中：再次点选同一检测区保持选中，当前方位证据继续可见
+  const selectZone = (id: ZoneId) => setSelectedId(id);
+
+  // 键盘打开证据：更新选区并请求在渲染完成后把焦点移入审阅区
+  const openZoneFromKeyboard = (id: ZoneId) => {
+    selectZone(id);
+    setReviewFocusTick((n) => n + 1);
+  };
 
   return (
     <main className="app">
@@ -254,7 +271,7 @@ export default function App() {
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' || e.key === ' ') {
                         e.preventDefault();
-                        selectZone(z.zone.id);
+                        openZoneFromKeyboard(z.zone.id);
                       }
                     }}
                   />
@@ -277,7 +294,7 @@ export default function App() {
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' || e.key === ' ') {
                       e.preventDefault();
-                      selectZone(z.zone.id);
+                      openZoneFromKeyboard(z.zone.id);
                     }
                   }}
                 >
@@ -300,7 +317,13 @@ export default function App() {
           </div>
 
           {selected && pixelsRef.current && (
-            <section className="review" data-testid="review">
+            <section
+              className="review"
+              data-testid="review"
+              ref={reviewRef}
+              tabIndex={-1}
+              aria-live="polite"
+            >
               <h2>{selected.zone.label}检测区 · 像素级证据</h2>
               <div className="review-body">
                 <figure className="review-crop-wrap">
