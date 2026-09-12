@@ -43,6 +43,23 @@ async function upload(page: import('@playwright/test').Page, name: string, buffe
   await page.getByTestId('file-input').setInputFiles({ name, mimeType: 'image/png', buffer });
 }
 
+/** 读取审阅裁片画布上某个局部像素（0–31 坐标）的 RGBA */
+async function cropPixel(
+  page: import('@playwright/test').Page,
+  x: number,
+  y: number,
+): Promise<[number, number, number, number]> {
+  return page.$eval(
+    '[data-testid="review-crop"]',
+    (el, point) => {
+      const canvas = el as HTMLCanvasElement;
+      const d = canvas.getContext('2d')!.getImageData(point.x, point.y, 1, 1).data;
+      return [d[0], d[1], d[2], d[3]];
+    },
+    { x, y },
+  );
+}
+
 test.beforeEach(async ({ page }) => {
   await page.goto('/');
 });
@@ -108,4 +125,90 @@ test('上传错误后清除旧结果', async ({ page }) => {
   await expect(page.getByTestId('upload-error')).toContainText('尺寸不符');
   await expect(page.getByTestId('verdict')).toHaveCount(0);
   await expect(page.getByTestId('zone-top-left')).toHaveCount(0);
+});
+
+test.describe('点选检测区查看像素级证据', () => {
+  test.beforeEach(async ({ page }) => {
+    // 统计浏览器原生解码次数：切换审阅选区只应复用已采样像素，不得重新解码
+    await page.addInitScript(() => {
+      const w = window as unknown as {
+        __decodeCount?: number;
+      };
+      w.__decodeCount = 0;
+      const orig = window.createImageBitmap.bind(window);
+      window.createImageBitmap = ((...args: Parameters<typeof createImageBitmap>) => {
+        w.__decodeCount = (w.__decodeCount ?? 0) + 1;
+        return orig(...args);
+      }) as typeof createImageBitmap;
+    });
+    // addInitScript 只对之后的导航生效，而外层 beforeEach 已先完成 goto，这里重载一次
+    await page.reload();
+  });
+
+  test('819 像素的右上区：点选后显示 32×32 裁片与确定缺口范围，切换选区不重新解码', async ({
+    page,
+  }) => {
+    await upload(page, 'almost.png', almostPng);
+    await expect(page.getByTestId('verdict')).toContainText('不合格');
+
+    // 未点选时不出现审阅区，原判定与四区展示保持兼容
+    await expect(page.getByTestId('review')).toHaveCount(0);
+    await expect(page.getByTestId('zone-top-right-hits')).toHaveText('命中 819 / 1024');
+
+    // 点选右上检测卡片
+    await page.getByTestId('zone-top-right').click();
+    const review = page.getByTestId('review');
+    await expect(review).toBeVisible();
+    await expect(review).toContainText('右上');
+
+    // 819 = 25 整行 + 第 26 行前 19 像素；其后 6 行整行缺失，
+    // 唯一包围范围因此横跨检测区全宽 x 976–1007、y 41–47
+    await expect(page.getByTestId('review-gap-bounds')).toHaveText(
+      '缺口范围：x 976–1007，y 41–47（未命中 205 像素）',
+    );
+    await expect(page.getByTestId('review-edge-top')).toHaveText('上边缺口：0');
+    await expect(page.getByTestId('review-edge-bottom')).toHaveText('下边缺口：32');
+    await expect(page.getByTestId('review-edge-left')).toHaveText('左边缺口：6');
+    await expect(page.getByTestId('review-edge-right')).toHaveText('右边缺口：7');
+
+    // 32×32 裁片取的是原始像素：命中处品红、首个未命中处白色
+    expect(await cropPixel(page, 0, 0)).toEqual([255, 0, 255, 255]);
+    expect(await cropPixel(page, 18, 25)).toEqual([255, 0, 255, 255]);
+    expect(await cropPixel(page, 19, 25)).toEqual([255, 255, 255, 255]);
+
+    const decodeCountAfterOpen = await page.evaluate(
+      () => (window as unknown as { __decodeCount: number }).__decodeCount,
+    );
+    expect(decodeCountAfterOpen).toBe(1);
+
+    // 点预览框切换到满命中的左上区，审阅区只更新内容
+    await page.getByTestId('zone-box-top-left').click();
+    await expect(review).toContainText('左上');
+    await expect(page.getByTestId('review-gap-bounds')).toHaveText(
+      '缺口范围：无缺口（1024 个像素全部命中）',
+    );
+    expect(await cropPixel(page, 0, 0)).toEqual([255, 0, 255, 255]);
+
+    // 再切回右上，数据仍来自同一次解码
+    await page.getByTestId('zone-top-right').click();
+    await expect(page.getByTestId('review-gap-bounds')).toContainText('x 976–1007');
+    const decodeCountAfterSwitch = await page.evaluate(
+      () => (window as unknown as { __decodeCount: number }).__decodeCount,
+    );
+    expect(decodeCountAfterSwitch).toBe(1);
+  });
+
+  test('新上传无效文件后审阅区与上一次选区一并消失', async ({ page }) => {
+    await upload(page, 'almost.png', almostPng);
+    await page.getByTestId('zone-top-right').click();
+    await expect(page.getByTestId('review')).toBeVisible();
+    await expect(page.getByTestId('review-crop')).toBeVisible();
+
+    await upload(page, 'fake.png', notPng);
+    await expect(page.getByTestId('upload-error')).toContainText('格式不支持');
+    await expect(page.getByTestId('review')).toHaveCount(0);
+    await expect(page.getByTestId('review-crop')).toHaveCount(0);
+    await expect(page.getByTestId('verdict')).toHaveCount(0);
+    await expect(page.getByTestId('zone-top-right')).toHaveCount(0);
+  });
 });

@@ -112,7 +112,18 @@ h1 {
 .zone-box {
   position: absolute;
   border: 2px solid;
-  pointer-events: none;
+  cursor: pointer;
+  outline: none;
+}
+
+.zone-box:focus-visible {
+  outline: 2px solid #2f80ed;
+  outline-offset: 2px;
+}
+
+.zone-box.selected {
+  border-width: 3px;
+  background: rgba(47, 128, 237, 0.12);
 }
 
 .zone-box.present {
@@ -141,6 +152,18 @@ h1 {
   border-radius: 8px;
   padding: 12px;
   background: #fff;
+  cursor: pointer;
+  outline: none;
+}
+
+.zone-card:focus-visible {
+  outline: 2px solid #2f80ed;
+  outline-offset: 2px;
+}
+
+.zone-card.selected {
+  border-color: #2f80ed;
+  box-shadow: 0 0 0 1px rgba(47, 128, 237, 0.5);
 }
 
 .zone-card header {
@@ -183,4 +206,81 @@ h1 {
   margin-top: 6px;
   font-size: 12px;
   color: #c81e1e;
+}
+
+.zone-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #7b8794;
+}
+
+.review {
+  margin-top: 20px;
+  border: 1px solid #d9e2ec;
+  border-radius: 8px;
+  padding: 16px;
+  background: #fff;
+}
+
+.review h2 {
+  font-size: 16px;
+  margin: 0 0 12px;
+}
+
+.review-body {
+  display: flex;
+  gap: 24px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.review-crop-wrap {
+  margin: 0;
+}
+
+.review-crop {
+  display: block;
+  width: 256px;
+  height: 256px;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  border: 1px solid #d9e2ec;
+  background: #fff;
+}
+
+.review-crop-wrap figcaption {
+  margin-top: 8px;
+  width: 256px;
+  font-size: 12px;
+  color: #52606d;
+  line-height: 1.6;
+}
+
+.review-detail {
+  flex: 1;
+  min-width: 260px;
+}
+
+.review-bounds {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.edge-counts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(120px, 1fr));
+  gap: 8px;
+  font-variant-numeric: tabular-nums;
+  font-size: 14px;
+}
+
+.edge-counts li {
+  background: #f5f7fa;
+  border-radius: 6px;
+  padding: 8px 12px;
 }

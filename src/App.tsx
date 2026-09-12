@@ -1,12 +1,15 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import {
   analyzePixels,
   hasPngSignature,
   HIT_THRESHOLD,
   IMAGE_SIZE,
+  ZONE_SIZE,
   type Analysis,
   type Zone,
+  type ZoneId,
+  type ZoneResult,
 } from './lib/detect';
 import './App.css';
 
@@ -28,17 +31,80 @@ function zoneBoxStyle(zone: Zone): CSSProperties {
   };
 }
 
+/**
+ * 审阅裁片：把检测区 32×32 原始像素逐块复制到一张 32×32 画布，
+ * 再由 CSS 以最近邻（image-rendering: pixelated）放大。
+ * 数据直接取自上传时已采样的像素缓冲，切换选区不会重新解码文件。
+ */
+function ZoneCrop({ pixels, zone }: { pixels: Uint8ClampedArray; zone: Zone }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const imageData = ctx.createImageData(ZONE_SIZE, ZONE_SIZE);
+    for (let y = 0; y < ZONE_SIZE; y += 1) {
+      for (let x = 0; x < ZONE_SIZE; x += 1) {
+        const src = ((zone.y0 + y) * IMAGE_SIZE + (zone.x0 + x)) * 4;
+        const dst = (y * ZONE_SIZE + x) * 4;
+        imageData.data[dst] = pixels[src];
+        imageData.data[dst + 1] = pixels[src + 1];
+        imageData.data[dst + 2] = pixels[src + 2];
+        imageData.data[dst + 3] = pixels[src + 3];
+      }
+    }
+    ctx.putImageData(imageData, 0, 0);
+  }, [pixels, zone]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      width={ZONE_SIZE}
+      height={ZONE_SIZE}
+      className="review-crop"
+      data-testid="review-crop"
+      aria-label={`${zone.label}检测区 32×32 原始像素裁片（最近邻放大）`}
+    />
+  );
+}
+
+function GapReview({ result }: { result: ZoneResult }) {
+  const { gapBounds, edgeGaps, misses } = result;
+  return (
+    <div className="review-detail">
+      <div className="review-bounds" data-testid="review-gap-bounds">
+        {gapBounds
+          ? `缺口范围：x ${gapBounds.minX}–${gapBounds.maxX}，y ${gapBounds.minY}–${gapBounds.maxY}（未命中 ${misses} 像素）`
+          : '缺口范围：无缺口（1024 个像素全部命中）'}
+      </div>
+      <ul className="edge-counts">
+        <li data-testid="review-edge-top">上边缺口：{edgeGaps.top}</li>
+        <li data-testid="review-edge-bottom">下边缺口：{edgeGaps.bottom}</li>
+        <li data-testid="review-edge-left">左边缺口：{edgeGaps.left}</li>
+        <li data-testid="review-edge-right">右边缺口：{edgeGaps.right}</li>
+      </ul>
+    </div>
+  );
+}
+
 export default function App() {
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
   const [error, setError] = useState<UploadError | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [fileName, setFileName] = useState('');
+  const [selectedId, setSelectedId] = useState<ZoneId | null>(null);
+  // 当前分析所用的原始 RGBA 像素缓冲；切换审阅选区时直接复用，不重新解码
+  const pixelsRef = useRef<Uint8ClampedArray | null>(null);
   // 单调递增序号，防止连续上传时旧异步结果覆盖新状态
   const requestSeq = useRef(0);
 
   const clearResult = () => {
     setAnalysis(null);
     setError(null);
+    setSelectedId(null);
+    pixelsRef.current = null;
     setPreviewUrl((old) => {
       if (old) URL.revokeObjectURL(old);
       return null;
@@ -47,7 +113,7 @@ export default function App() {
 
   const handleFile = async (file: File) => {
     const seq = ++requestSeq.current;
-    // 任何新上传都先清除旧结果
+    // 任何新上传都先清除旧结果（含上一次选区与裁片）
     clearResult();
     setFileName(file.name);
 
@@ -92,19 +158,35 @@ export default function App() {
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) {
       bitmap.close();
-      fail({ title: '环境异常', detail: '无法创建 Canvas 2D 上下文。' });
+      fail({ title: '环境异常', detail: '无法创建 Canvas 2D 上下文，无法读取原始像素。' });
       return;
     }
-    ctx.drawImage(bitmap, 0, 0);
+    let pixels: Uint8ClampedArray;
+    try {
+      ctx.drawImage(bitmap, 0, 0);
+    } catch {
+      bitmap.close();
+      fail({ title: '环境异常', detail: 'Canvas 像素采样失败，当前浏览器环境不允许绘制该图像。' });
+      return;
+    }
     bitmap.close();
-    const pixels = ctx.getImageData(0, 0, IMAGE_SIZE, IMAGE_SIZE).data;
+    try {
+      pixels = ctx.getImageData(0, 0, IMAGE_SIZE, IMAGE_SIZE).data;
+    } catch {
+      fail({ title: '环境异常', detail: 'Canvas 像素采样失败，当前浏览器环境不允许读取图像像素。' });
+      return;
+    }
 
     if (seq !== requestSeq.current) return;
+    pixelsRef.current = pixels;
     setAnalysis(analyzePixels(pixels, IMAGE_SIZE, IMAGE_SIZE));
     setPreviewUrl(URL.createObjectURL(file));
   };
 
   const missing = analysis?.zones.filter((z) => !z.present) ?? [];
+  const selected = analysis?.zones.find((z) => z.zone.id === selectedId) ?? null;
+
+  const selectZone = (id: ZoneId) => setSelectedId((current) => (current === id ? null : id));
 
   return (
     <main className="app">
@@ -112,7 +194,8 @@ export default function App() {
       <p className="hint">
         上传一张恰为 1024×1024 的 PNG。系统检测四个角部 32×32 检测区（闭区间 x/y 各 16–47 与
         976–1007），每区 1024 个像素中至少 820 个命中（R≥240、G≤15、B≥240、A=255）视为角标存在，
-        四区全部存在判定合格。采样基于原始像素，预览缩放不影响结果。
+        四区全部存在判定合格。采样基于原始像素，预览缩放不影响结果。点选任一检测卡片或预览框，
+        可查看该区 32×32 原始像素裁片、未命中像素包围范围与四边缺口计数。
       </p>
 
       <div className="upload">
@@ -157,10 +240,23 @@ export default function App() {
                 {analysis.zones.map((z) => (
                   <div
                     key={z.zone.id}
-                    className={`zone-box ${z.present ? 'present' : 'absent'}`}
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`查看${z.zone.label}检测区原始像素`}
+                    aria-pressed={selectedId === z.zone.id}
+                    className={`zone-box ${z.present ? 'present' : 'absent'} ${
+                      selectedId === z.zone.id ? 'selected' : ''
+                    }`}
                     style={zoneBoxStyle(z.zone)}
                     data-testid={`zone-box-${z.zone.id}`}
-                    title={z.zone.label}
+                    title={`点选查看${z.zone.label}原始像素`}
+                    onClick={() => selectZone(z.zone.id)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        selectZone(z.zone.id);
+                      }
+                    }}
                   />
                 ))}
               </div>
@@ -170,8 +266,20 @@ export default function App() {
               {analysis.zones.map((z) => (
                 <li
                   key={z.zone.id}
-                  className={`zone-card ${z.present ? 'present' : 'absent'}`}
+                  role="button"
+                  tabIndex={0}
+                  aria-pressed={selectedId === z.zone.id}
+                  className={`zone-card ${z.present ? 'present' : 'absent'} ${
+                    selectedId === z.zone.id ? 'selected' : ''
+                  }`}
                   data-testid={`zone-${z.zone.id}`}
+                  onClick={() => selectZone(z.zone.id)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      selectZone(z.zone.id);
+                    }
+                  }}
                 >
                   <header>
                     <span className="zone-label">{z.zone.label}</span>
@@ -185,10 +293,27 @@ export default function App() {
                       未达标：命中 {z.hits} 低于阈值 {HIT_THRESHOLD}
                     </div>
                   )}
+                  <div className="zone-hint">点选查看原始像素裁片</div>
                 </li>
               ))}
             </ul>
           </div>
+
+          {selected && pixelsRef.current && (
+            <section className="review" data-testid="review">
+              <h2>{selected.zone.label}检测区 · 像素级证据</h2>
+              <div className="review-body">
+                <figure className="review-crop-wrap">
+                  <ZoneCrop pixels={pixelsRef.current} zone={selected.zone} />
+                  <figcaption>
+                    32×32 原始像素裁片（坐标 x {selected.zone.x0}–{selected.zone.x1}，y{' '}
+                    {selected.zone.y0}–{selected.zone.y1}），最近邻放大显示
+                  </figcaption>
+                </figure>
+                <GapReview result={selected} />
+              </div>
+            </section>
+          )}
         </section>
       )}
     </main>

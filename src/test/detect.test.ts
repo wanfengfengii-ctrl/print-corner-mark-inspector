@@ -6,6 +6,7 @@ import {
   HIT_THRESHOLD,
   IMAGE_SIZE,
   isHitPixel,
+  locateGaps,
   PNG_SIGNATURE,
   ZONE_PIXELS,
   ZONES,
@@ -136,6 +137,84 @@ describe('阈值判定（每区 1024 像素至少 820 命中）', () => {
       return ring ? MAGENTA : WHITE;
     });
     expect(countZoneHits(px, IMAGE_SIZE, z)).toBe(0);
+  });
+});
+
+describe('缺口定位（未命中像素包围范围与四边计数）', () => {
+  /** 指定检测区内命中品红、谓词命中处置白（未命中）；区外置白避免干扰其他区 */
+  function pixelsWithMisses(
+    zoneIndex: number,
+    isMiss: (x: number, y: number) => boolean,
+  ): Uint8ClampedArray {
+    return makePixels((x, y) => (inZone(x, y, zoneIndex) ? (isMiss(x, y) ? WHITE : MAGENTA) : WHITE));
+  }
+
+  it('单边缺口：仅上边缘内部 30 像素未命中，只计入上边', () => {
+    const z = ZONES[0];
+    const px = pixelsWithMisses(0, (x, y) => y === z.y0 && x >= z.x0 + 1 && x <= z.x1 - 1);
+
+    const gap = locateGaps(px, IMAGE_SIZE, z);
+    expect(gap.misses).toBe(30);
+    expect(gap.edgeGaps).toEqual({ top: 30, bottom: 0, left: 0, right: 0 });
+    expect(gap.gapBounds).toEqual({ minX: z.x0 + 1, minY: z.y0, maxX: z.x1 - 1, maxY: z.y0 });
+    // 与既有命中计数保持一致
+    expect(countZoneHits(px, IMAGE_SIZE, z)).toBe(ZONE_PIXELS - 30);
+  });
+
+  it('离散缺口：三个不连续像素仍得到唯一包围范围，角点同时计入相邻两边', () => {
+    const z = ZONES[0];
+    const missPixels = new Set(
+      [`${z.x0},${z.y0}`, `${z.x0 + 5},${z.y0 + 7}`, `${z.x1},${z.y1}`],
+    );
+    const px = pixelsWithMisses(0, (x, y) => missPixels.has(`${x},${y}`));
+
+    const gap = locateGaps(px, IMAGE_SIZE, z);
+    expect(gap.misses).toBe(3);
+    // 即使缺口互不相连，包围范围仍覆盖全部未命中像素的极值
+    expect(gap.gapBounds).toEqual({ minX: z.x0, minY: z.y0, maxX: z.x1, maxY: z.y1 });
+    // (x0,y0) 同时位于上边与左边；(x1,y1) 同时位于下边与右边；内部点不计入任何边
+    expect(gap.edgeGaps).toEqual({ top: 1, bottom: 1, left: 1, right: 1 });
+    expect(countZoneHits(px, IMAGE_SIZE, z)).toBe(ZONE_PIXELS - 3);
+  });
+
+  it('无缺口：满命中区域 gapBounds 为 null 且四边计数均为 0，不伪造坐标', () => {
+    const z = ZONES[0];
+    const px = pixelsWithMisses(0, () => false);
+
+    expect(locateGaps(px, IMAGE_SIZE, z)).toEqual({
+      misses: 0,
+      gapBounds: null,
+      edgeGaps: { top: 0, bottom: 0, left: 0, right: 0 },
+    });
+  });
+
+  it('analyzePixels 在既有字段上兼容补充缺口数据，命中规则与 820 阈值不变', () => {
+    // 右上区 819 命中（末 205 像素未命中），其余区满命中
+    const tr = ZONES[1];
+    const px = makePixels((x, y) => {
+      if (x >= tr.x0 && x <= tr.x1 && y >= tr.y0 && y <= tr.y1) {
+        const n = (y - tr.y0) * (tr.x1 - tr.x0 + 1) + (x - tr.x0);
+        return n < HIT_THRESHOLD - 1 ? MAGENTA : WHITE;
+      }
+      return ZONES.some((_, i) => i !== 1 && inZone(x, y, i)) ? MAGENTA : WHITE;
+    });
+
+    const res = analyzePixels(px, IMAGE_SIZE, IMAGE_SIZE);
+    expect(res.zones[1].hits).toBe(819);
+    expect(res.zones[1].present).toBe(false);
+    expect(res.zones[1].misses).toBe(205);
+    // 819 = 25 整行 + 第 26 行前 19 像素：缺口从局部行 25（y=41）开始，
+    // 其后 6 行整行缺失，故唯一包围范围横跨检测区全宽（x 976–1007）
+    expect(res.zones[1].gapBounds).toEqual({ minX: 976, minY: 41, maxX: 1007, maxY: 47 });
+    // 右边缘：第 26 行缺 1 个 + 后 6 整行；左边缘仅后 6 整行
+    expect(res.zones[1].edgeGaps).toEqual({ top: 0, bottom: 32, left: 6, right: 7 });
+
+    // 满命中区不产生伪造坐标
+    for (const i of [0, 2, 3]) {
+      expect(res.zones[i].gapBounds).toBeNull();
+      expect(res.zones[i].misses).toBe(0);
+      expect(res.zones[i].edgeGaps).toEqual({ top: 0, bottom: 0, left: 0, right: 0 });
+    }
   });
 });
 

@@ -52,6 +52,30 @@ export function isHitPixel(r: number, g: number, b: number, a: number): boolean 
   return r >= 240 && g <= 15 && b >= 240 && a === 255;
 }
 
+/** 未命中像素在检测区四边上的缺口计数（位于闭区间边界上的像素数） */
+export interface EdgeGaps {
+  /** 上边缘（y = zone.y0）上的未命中像素数 */
+  top: number;
+  /** 下边缘（y = zone.y1）上的未命中像素数 */
+  bottom: number;
+  /** 左边缘（x = zone.x0）上的未命中像素数 */
+  left: number;
+  /** 右边缘（x = zone.x1）上的未命中像素数 */
+  right: number;
+}
+
+/** 未命中像素的最小包围范围；不存在未命中像素时为 null */
+export interface GapBounds {
+  /** 包围范围起点 x（含） */
+  minX: number;
+  /** 包围范围起点 y（含） */
+  minY: number;
+  /** 包围范围终点 x（含） */
+  maxX: number;
+  /** 包围范围终点 y（含） */
+  maxY: number;
+}
+
 export interface ZoneResult {
   zone: Zone;
   /** 闭区间内实际命中数 */
@@ -60,6 +84,16 @@ export interface ZoneResult {
   total: number;
   /** hits ≥ HIT_THRESHOLD 时角标存在 */
   present: boolean;
+  /** 未命中像素数（total - hits） */
+  misses: number;
+  /**
+   * 全部未命中像素的最小轴对齐包围范围（原始 1024×1024 坐标，闭区间）。
+   * 缺口即使由多段离散像素组成，仍按全部未命中像素计算唯一包围范围。
+   * 满命中（不存在未命中像素）时为 null，不伪造坐标。
+   */
+  gapBounds: GapBounds | null;
+  /** 未命中像素在检测区上、下、左、右四条边上的计数 */
+  edgeGaps: EdgeGaps;
 }
 
 export interface Analysis {
@@ -87,6 +121,52 @@ export function countZoneHits(pixels: Uint8ClampedArray, width: number, zone: Zo
 }
 
 /**
+ * 定位单个检测区内未命中像素的分布：
+ * 返回全部未命中像素的最小包围范围与四边缺口计数。
+ *
+ * - 包围范围取所有未命中像素的 min/max，离散缺口也只产生唯一包围范围；
+ * - 边缘计数统计落在检测区闭区间边界（上/下/左/右）上的未命中像素；
+ * - 不存在未命中像素（满命中）时包围范围为 null、四边计数为 0，不伪造坐标。
+ */
+export function locateGaps(
+  pixels: Uint8ClampedArray,
+  width: number,
+  zone: Zone,
+): { misses: number; gapBounds: GapBounds | null; edgeGaps: EdgeGaps } {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let misses = 0;
+  const edgeGaps: EdgeGaps = { top: 0, bottom: 0, left: 0, right: 0 };
+
+  for (let y = zone.y0; y <= zone.y1; y += 1) {
+    const row = y * width;
+    for (let x = zone.x0; x <= zone.x1; x += 1) {
+      const i = (row + x) * 4;
+      if (isHitPixel(pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3])) {
+        continue;
+      }
+      misses += 1;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+      if (y === zone.y0) edgeGaps.top += 1;
+      if (y === zone.y1) edgeGaps.bottom += 1;
+      if (x === zone.x0) edgeGaps.left += 1;
+      if (x === zone.x1) edgeGaps.right += 1;
+    }
+  }
+
+  return {
+    misses,
+    gapBounds: misses === 0 ? null : { minX, minY, maxX, maxY },
+    edgeGaps,
+  };
+}
+
+/**
  * 分析一幅 1024×1024 图像的 RGBA 像素数据。
  * 调用方必须保证尺寸恰为 IMAGE_SIZE×IMAGE_SIZE，否则抛错。
  */
@@ -95,8 +175,17 @@ export function analyzePixels(pixels: Uint8ClampedArray, width: number, height: 
     throw new Error(`analyzePixels 要求 ${IMAGE_SIZE}×${IMAGE_SIZE}，收到 ${width}×${height}`);
   }
   const zones = ZONES.map((zone) => {
-    const hits = countZoneHits(pixels, width, zone);
-    return { zone, hits, total: ZONE_PIXELS, present: hits >= HIT_THRESHOLD };
+    const { misses, gapBounds, edgeGaps } = locateGaps(pixels, width, zone);
+    const hits = ZONE_PIXELS - misses;
+    return {
+      zone,
+      hits,
+      total: ZONE_PIXELS,
+      present: hits >= HIT_THRESHOLD,
+      misses,
+      gapBounds,
+      edgeGaps,
+    };
   });
   return { zones, passed: zones.every((z) => z.present) };
 }
