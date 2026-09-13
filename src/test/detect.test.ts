@@ -1,7 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
   analyzePixels,
+  buildZoneDiffRgba,
+  classifyDiff,
+  comparePixels,
   countZoneHits,
+  DIFF_COLORS,
+  DIFF_NEW_GAP,
+  DIFF_RECOVERED,
+  DIFF_SAME_HIT,
+  DIFF_SAME_MISS,
   hasPngSignature,
   HIT_THRESHOLD,
   IMAGE_SIZE,
@@ -257,5 +265,184 @@ describe('PNG 文件头校验', () => {
     expect(hasPngSignature(new Uint8Array([0x89, 0x50, 0x4e]))).toBe(false);
     expect(hasPngSignature(new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, 0]))).toBe(false);
     expect(hasPngSignature(new Uint8Array(0))).toBe(false);
+  });
+});
+
+describe('复检前后对比（comparePixels 逐像素分类）', () => {
+  /**
+   * 生成检测区外全白、四个检测区按各区谓词决定命中的像素缓冲。
+   * miss 谓词返回 true 的局部坐标处置白（未命中），其余命中。
+   */
+  function makeComparisonPixels(
+    missByZone: ReadonlyArray<(lx: number, ly: number) => boolean>,
+  ): Uint8ClampedArray {
+    return makePixels((x, y) => {
+      const zi = ZONES.findIndex((z) => x >= z.x0 && x <= z.x1 && y >= z.y0 && y <= z.y1);
+      if (zi < 0) return WHITE;
+      const z = ZONES[zi];
+      return missByZone[zi](x - z.x0, y - z.y0) ? WHITE : MAGENTA;
+    });
+  }
+
+  const noMiss = () => false;
+
+  it('classifyDiff 四种逐像素类别', () => {
+    expect(classifyDiff(true, true)).toBe('same-hit');
+    expect(classifyDiff(false, false)).toBe('same-miss');
+    expect(classifyDiff(false, true)).toBe('recovered');
+    expect(classifyDiff(true, false)).toBe('new-gap');
+  });
+
+  it('无变化：两张相同合格图，各区无增减、分类全部为两次均命中', () => {
+    const px = makeComparisonPixels([noMiss, noMiss, noMiss, noMiss]);
+    const cmp = comparePixels(px, px, IMAGE_SIZE, IMAGE_SIZE);
+
+    expect(cmp.baseline.passed).toBe(true);
+    expect(cmp.recheck.passed).toBe(true);
+    for (const d of cmp.zones) {
+      expect(d.hitDelta).toBe(0);
+      expect(d.recovered).toBe(0);
+      expect(d.newGaps).toBe(0);
+      expect(d.unchangedHits).toBe(ZONE_PIXELS);
+      expect(d.unchangedMisses).toBe(0);
+      expect(Array.from(d.classes)).toEqual(Array(ZONE_PIXELS).fill(DIFF_SAME_HIT));
+    }
+  });
+
+  it('缺口修复：基准右上 819 命中（末 205 像素缺失），复检满命中 → 恢复 205、无新增缺失', () => {
+    const missTail = (lx: number, ly: number) => ly * 32 + lx >= 819;
+    const baseline = makeComparisonPixels([noMiss, missTail, noMiss, noMiss]);
+    const recheck = makeComparisonPixels([noMiss, noMiss, noMiss, noMiss]);
+
+    const cmp = comparePixels(baseline, recheck, IMAGE_SIZE, IMAGE_SIZE);
+
+    // 复用 Analysis / ZoneResult：基准不合格、复检合格，且区结果与单独分析一致
+    expect(cmp.baseline.passed).toBe(false);
+    expect(cmp.recheck.passed).toBe(true);
+    expect(cmp.baseline.zones[1]).toBe(cmp.zones[1].baseline);
+    expect(cmp.recheck.zones[1]).toBe(cmp.zones[1].recheck);
+    expect(cmp.zones[1].baseline.present).toBe(false);
+    expect(cmp.zones[1].recheck.present).toBe(true);
+
+    const d = cmp.zones[1];
+    expect(d.baseline.hits).toBe(819);
+    expect(d.recheck.hits).toBe(1024);
+    expect(d.hitDelta).toBe(205);
+    expect(d.recovered).toBe(205);
+    expect(d.newGaps).toBe(0);
+    expect(d.unchangedHits).toBe(819);
+    expect(d.unchangedMisses).toBe(0);
+    // 逐区统计：其余三区均无变化
+    for (const i of [0, 2, 3]) {
+      expect(cmp.zones[i].recovered).toBe(0);
+      expect(cmp.zones[i].newGaps).toBe(0);
+      expect(cmp.zones[i].hitDelta).toBe(0);
+    }
+    // 分类图：首个缺口局部坐标 (19,25)（k=819）为恢复命中，其之前为两次均命中
+    expect(d.classes[818]).toBe(DIFF_SAME_HIT);
+    expect(d.classes[819]).toBe(DIFF_RECOVERED);
+    expect(d.classes[1023]).toBe(DIFF_RECOVERED);
+  });
+
+  it('缺口转移：左上 10 个缺口从局部 0–9 平移到 20–29，恢复与新增各 10、命中总数不变', () => {
+    const baselineMiss = (lx: number, ly: number) => ly === 0 && lx <= 9;
+    const recheckMiss = (lx: number, ly: number) => ly === 0 && lx >= 20 && lx <= 29;
+    const baseline = makeComparisonPixels([baselineMiss, noMiss, noMiss, noMiss]);
+    const recheck = makeComparisonPixels([recheckMiss, noMiss, noMiss, noMiss]);
+
+    const cmp = comparePixels(baseline, recheck, IMAGE_SIZE, IMAGE_SIZE);
+    const d = cmp.zones[0];
+
+    // 两次都恰好缺 10 个像素，判定均为角标存在，命中增减为 0
+    expect(d.baseline.hits).toBe(1014);
+    expect(d.recheck.hits).toBe(1014);
+    expect(d.baseline.present).toBe(true);
+    expect(d.recheck.present).toBe(true);
+    expect(d.hitDelta).toBe(0);
+    expect(d.recovered).toBe(10);
+    expect(d.newGaps).toBe(10);
+    expect(d.unchangedHits).toBe(1004);
+    expect(d.unchangedMisses).toBe(0);
+
+    // 按相同原始坐标逐像素分类（k = ly*32 + lx）
+    for (let lx = 0; lx <= 9; lx += 1) expect(d.classes[lx]).toBe(DIFF_RECOVERED);
+    for (let lx = 10; lx <= 19; lx += 1) expect(d.classes[lx]).toBe(DIFF_SAME_HIT);
+    for (let lx = 20; lx <= 29; lx += 1) expect(d.classes[lx]).toBe(DIFF_NEW_GAP);
+    for (let lx = 30; lx <= 31; lx += 1) expect(d.classes[lx]).toBe(DIFF_SAME_HIT);
+    // 第二行起全部两次均命中
+    expect(d.classes[32]).toBe(DIFF_SAME_HIT);
+
+    // 其他区无变化
+    for (const i of [1, 2, 3]) {
+      expect(cmp.zones[i].recovered).toBe(0);
+      expect(cmp.zones[i].newGaps).toBe(0);
+    }
+  });
+
+  it('新增缺失：基准满命中、复检末 205 像素缺失 → 新增 205、无恢复，复检转不合格', () => {
+    const baseline = makeComparisonPixels([noMiss, noMiss, noMiss, noMiss]);
+    const missTail = (lx: number, ly: number) => ly * 32 + lx >= 819;
+    const recheck = makeComparisonPixels([noMiss, missTail, noMiss, noMiss]);
+
+    const cmp = comparePixels(baseline, recheck, IMAGE_SIZE, IMAGE_SIZE);
+    expect(cmp.baseline.passed).toBe(true);
+    expect(cmp.recheck.passed).toBe(false);
+
+    const d = cmp.zones[1];
+    expect(d.hitDelta).toBe(-205);
+    expect(d.recovered).toBe(0);
+    expect(d.newGaps).toBe(205);
+    expect(d.unchangedHits).toBe(819);
+    expect(d.unchangedMisses).toBe(0);
+    expect(d.classes[819]).toBe(DIFF_NEW_GAP);
+    expect(d.classes[1023]).toBe(DIFF_NEW_GAP);
+  });
+
+  it('同一位置持续未命中计为两次均缺失，不与恢复/新增混淆', () => {
+    const sameMiss = (lx: number, ly: number) => ly === 0 && lx <= 4;
+    const px = makeComparisonPixels([sameMiss, noMiss, noMiss, noMiss]);
+
+    const d = comparePixels(px, px, IMAGE_SIZE, IMAGE_SIZE).zones[0];
+    expect(d.recovered).toBe(0);
+    expect(d.newGaps).toBe(0);
+    expect(d.unchangedMisses).toBe(5);
+    expect(d.unchangedHits).toBe(1019);
+    for (let lx = 0; lx <= 4; lx += 1) expect(d.classes[lx]).toBe(DIFF_SAME_MISS);
+    expect(d.classes[5]).toBe(DIFF_SAME_HIT);
+  });
+
+  it('检测区外的像素变化不计入任何区的对比统计', () => {
+    // 基准：检测区全品红、区外全白；复检：整图（含区外）品红
+    const baseline = makePixels((x, y) =>
+      ZONES.some((_, i) => inZone(x, y, i)) ? MAGENTA : WHITE,
+    );
+    const recheck = makePixels(() => MAGENTA);
+
+    const cmp = comparePixels(baseline, recheck, IMAGE_SIZE, IMAGE_SIZE);
+    for (const d of cmp.zones) {
+      expect(d.unchangedHits).toBe(ZONE_PIXELS);
+      expect(d.recovered).toBe(0);
+      expect(d.newGaps).toBe(0);
+      expect(d.hitDelta).toBe(0);
+    }
+  });
+
+  it('buildZoneDiffRgba 按分类图给出差异图配色', () => {
+    const baselineMiss = (lx: number, ly: number) => ly === 0 && lx <= 9;
+    const recheckMiss = (lx: number, ly: number) => ly === 0 && lx >= 20 && lx <= 29;
+    const baseline = makeComparisonPixels([baselineMiss, noMiss, noMiss, noMiss]);
+    const recheck = makeComparisonPixels([recheckMiss, noMiss, noMiss, noMiss]);
+    const d = comparePixels(baseline, recheck, IMAGE_SIZE, IMAGE_SIZE).zones[0];
+
+    const rgba = buildZoneDiffRgba(d);
+    const at = (k: number) => Array.from(rgba.slice(k * 4, k * 4 + 4));
+    expect(at(0)).toEqual([...DIFF_COLORS.recovered]);
+    expect(at(10)).toEqual([...DIFF_COLORS['same-hit']]);
+    expect(at(20)).toEqual([...DIFF_COLORS['new-gap']]);
+  });
+
+  it('尺寸不符时抛出异常', () => {
+    const bad = new Uint8ClampedArray(4);
+    expect(() => comparePixels(bad, bad, 1, 1)).toThrow(/1024×1024/);
   });
 });

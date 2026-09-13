@@ -197,3 +197,180 @@ export const PNG_SIGNATURE: readonly number[] = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0
 export function hasPngSignature(head: Uint8Array): boolean {
   return head.length >= PNG_SIGNATURE.length && PNG_SIGNATURE.every((b, i) => head[i] === b);
 }
+
+/* ===== 同工位复检：调整前基准图与复检图的前后对比 ===== */
+
+/**
+ * 图像载入流水线阶段标识（普通单图上传与复检图共用）：
+ * signature 格式校验 → decode 原生解码 → size 尺寸校验 → sample 像素取样。
+ */
+export type UploadStage = 'signature' | 'decode' | 'size' | 'sample';
+
+/**
+ * 逐像素变化类别。两张图按相同原始坐标、同一 isHitPixel 命中规则分别判定后：
+ *
+ * - same-hit：两次均命中；
+ * - same-miss：两次均未命中；
+ * - recovered：基准未命中、复检命中（恢复命中，缺口修复）；
+ * - new-gap：基准命中、复检未命中（新增缺失，缺口转移/恶化）。
+ */
+export type DiffClass = 'same-hit' | 'same-miss' | 'recovered' | 'new-gap';
+
+/** DiffClass 的数字编码，按 Uint8Array 存储 32×32 分类图 */
+export const DIFF_SAME_HIT = 0;
+export const DIFF_SAME_MISS = 1;
+export const DIFF_RECOVERED = 2;
+export const DIFF_NEW_GAP = 3;
+
+/** 编码 → 类别 的固定次序（下标即 DIFF_* 常量） */
+export const DIFF_CLASSES: readonly DiffClass[] = [
+  'same-hit',
+  'same-miss',
+  'recovered',
+  'new-gap',
+];
+
+/** 按基准/复检两次命中结果分类单个像素 */
+export function classifyDiff(baselineHit: boolean, recheckHit: boolean): DiffClass {
+  if (baselineHit === recheckHit) return baselineHit ? 'same-hit' : 'same-miss';
+  return recheckHit ? 'recovered' : 'new-gap';
+}
+
+/** 单个检测区的复检前后对比统计 */
+export interface ZoneDiff {
+  zone: Zone;
+  /** 基准判定（复用 ZoneResult，与 Comparison.baseline.zones 中同区为同一对象） */
+  baseline: ZoneResult;
+  /** 复检判定（复用 ZoneResult，与 Comparison.recheck.zones 中同区为同一对象） */
+  recheck: ZoneResult;
+  /** 复检命中数相对基准的增减：recheck.hits - baseline.hits（恰为 recovered - newGaps） */
+  hitDelta: number;
+  /** 恢复命中像素数：基准未命中 → 复检命中 */
+  recovered: number;
+  /** 新增缺失像素数：基准命中 → 复检未命中 */
+  newGaps: number;
+  /** 两次均命中像素数 */
+  unchangedHits: number;
+  /** 两次均未命中像素数 */
+  unchangedMisses: number;
+  /**
+   * 32×32 逐像素分类图（先行后列，局部坐标 (x - zone.x0, y - zone.y0)），
+   * 取值为 DIFF_* 常量；分类基于两张图相同的原始坐标。
+   */
+  classes: Uint8Array;
+}
+
+/** 两张同尺寸图像的复检对比结果；基准与复检本身仍是标准 Analysis */
+export interface Comparison {
+  baseline: Analysis;
+  recheck: Analysis;
+  zones: ZoneDiff[];
+}
+
+function pixelHits(
+  pixels: Uint8ClampedArray,
+  width: number,
+  x: number,
+  y: number,
+): boolean {
+  const i = (y * width + x) * 4;
+  return isHitPixel(pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]);
+}
+
+/**
+ * 对比调整前基准图与复检图的原始 RGBA 像素。
+ *
+ * 两张图都必须恰为 IMAGE_SIZE×IMAGE_SIZE（与 analyzePixels 相同约束），
+ * 基准与复检分别走 analyzePixels 得到 Analysis（复用 ZoneResult 与 820 阈值），
+ * 再在每个检测区内按相同原始坐标逐像素套用 isHitPixel 分类，
+ * 因此区外像素的任何变化都不会计入对比统计。
+ */
+export function comparePixels(
+  baselinePixels: Uint8ClampedArray,
+  recheckPixels: Uint8ClampedArray,
+  width: number,
+  height: number,
+): Comparison {
+  if (width !== IMAGE_SIZE || height !== IMAGE_SIZE) {
+    throw new Error(`comparePixels 要求 ${IMAGE_SIZE}×${IMAGE_SIZE}，收到 ${width}×${height}`);
+  }
+  const baseline = analyzePixels(baselinePixels, width, height);
+  const recheck = analyzePixels(recheckPixels, width, height);
+
+  const zones = ZONES.map((zone, zi) => {
+    const baselineZone = baseline.zones[zi];
+    const recheckZone = recheck.zones[zi];
+    const classes = new Uint8Array(ZONE_PIXELS);
+    let recovered = 0;
+    let newGaps = 0;
+    let unchangedHits = 0;
+    let unchangedMisses = 0;
+    let k = 0;
+    for (let y = zone.y0; y <= zone.y1; y += 1) {
+      for (let x = zone.x0; x <= zone.x1; x += 1) {
+        const cls = classifyDiff(
+          pixelHits(baselinePixels, width, x, y),
+          pixelHits(recheckPixels, width, x, y),
+        );
+        switch (cls) {
+          case 'same-hit':
+            unchangedHits += 1;
+            classes[k] = DIFF_SAME_HIT;
+            break;
+          case 'same-miss':
+            unchangedMisses += 1;
+            classes[k] = DIFF_SAME_MISS;
+            break;
+          case 'recovered':
+            recovered += 1;
+            classes[k] = DIFF_RECOVERED;
+            break;
+          case 'new-gap':
+            newGaps += 1;
+            classes[k] = DIFF_NEW_GAP;
+            break;
+        }
+        k += 1;
+      }
+    }
+    const diff: ZoneDiff = {
+      zone,
+      baseline: baselineZone,
+      recheck: recheckZone,
+      hitDelta: recheckZone.hits - baselineZone.hits,
+      recovered,
+      newGaps,
+      unchangedHits,
+      unchangedMisses,
+      classes,
+    };
+    return diff;
+  });
+
+  return { baseline, recheck, zones };
+}
+
+/** 差异图配色（RGBA）：品红=均命中，白=均未命中，绿=恢复，红=新增缺失 */
+export const DIFF_COLORS: Readonly<Record<DiffClass, readonly [number, number, number, number]>> = {
+  'same-hit': [255, 0, 255, 255],
+  'same-miss': [255, 255, 255, 255],
+  recovered: [16, 185, 129, 255],
+  'new-gap': [224, 36, 36, 255],
+};
+
+/**
+ * 把单区 32×32 分类图展开为 32×32 RGBA 像素缓冲（先行后列），
+ * 供 Canvas 以最近邻放大绘制差异图。
+ */
+export function buildZoneDiffRgba(diff: ZoneDiff): Uint8ClampedArray {
+  const out = new Uint8ClampedArray(ZONE_PIXELS * 4);
+  for (let k = 0; k < ZONE_PIXELS; k += 1) {
+    const [r, g, b, a] = DIFF_COLORS[DIFF_CLASSES[diff.classes[k]]];
+    const j = k * 4;
+    out[j] = r;
+    out[j + 1] = g;
+    out[j + 2] = b;
+    out[j + 3] = a;
+  }
+  return out;
+}
