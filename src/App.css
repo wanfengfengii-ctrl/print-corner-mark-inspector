@@ -415,6 +415,40 @@ h1 {
   outline-offset: 2px;
 }
 
+/* ===== 会话自动保存与恢复 ===== */
+
+/* 恢复进行中的提示条 */
+.session-restoring {
+  background: #e6f6ff;
+  color: #035388;
+  border: 1px solid #7fd4f5;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+/* 清除已保存会话按钮 */
+.session-clear {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 6px 14px;
+  border: 1px solid #cbd2d9;
+  border-radius: 8px;
+  background: #fff;
+  color: #3e4c59;
+  cursor: pointer;
+}
+
+.session-clear:hover {
+  border-color: #c81e1e;
+  color: #c81e1e;
+}
+
+.session-clear:focus-visible {
+  outline: 2px solid #2f80ed;
+  outline-offset: 2px;
+}
+
 /* 预览图左上角信息标签：标明该预览为调整前基准还是复检结果 */
 .preview-tag {
   position: absolute;

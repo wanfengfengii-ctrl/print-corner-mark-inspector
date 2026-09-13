@@ -17,6 +17,13 @@ import {
   type ZoneResult,
 } from '../lib/detect';
 import type { DiffClass } from '../lib/detect';
+import {
+  clearSessionSnapshot,
+  loadSessionSnapshot,
+  saveSessionSnapshot,
+  SESSION_SNAPSHOT_VERSION,
+  type SessionSnapshot,
+} from '../lib/sessionStore';
 
 interface UploadError {
   title: string;
@@ -260,6 +267,12 @@ const STAGE_LABEL: Record<RecheckStage, string> = {
  * 复检对比流程：首张有效图完成检测后即固定为基准（idle）；操作员可上传一张
  * 同尺寸 PNG 作为复检图，页面先进入 awaiting（待复检）、成功后进入 compared
  * （完成对比）。基准始终保留；取消对比回到当前单图结果。
+ *
+ * 会话自动恢复：每次基准或复检分析成功后，把原始 PNG 字节、当前对比阶段与
+ * 选中方位写入带结构版本的 IndexedDB 快照（src/lib/sessionStore.ts）。
+ * 页面重新加载时读取快照，重新走解码、取样与分析函数重建结果（不信任旧判定），
+ * 恢复期间显示「正在恢复」；快照缺图、版本不识别或 PNG 损坏时说明无法恢复、
+ * 清理该快照并回到初始上传态。照明校准状态不纳入保存。
  */
 export default function VerifyPage() {
   const [analysis, setAnalysis] = useState<Analysis | null>(null);
@@ -284,11 +297,140 @@ export default function VerifyPage() {
   const [comparison, setComparison] = useState<Comparison | null>(null);
   const recheckSeq = useRef(0);
 
+  // 会话快照：基准/复检图的原始 PNG 字节与文件名（恢复时重新解码分析，不信任旧判定）
+  const baselinePngRef = useRef<ArrayBuffer | null>(null);
+  const recheckPngRef = useRef<ArrayBuffer | null>(null);
+  const baselineNameRef = useRef('baseline.png');
+  const recheckNameRef = useRef('recheck.png');
+  // 页面加载后的快照恢复：restoring 期间显示「正在恢复」并暂停上传入口
+  const [restoring, setRestoring] = useState(false);
+  const [restoreFailure, setRestoreFailure] = useState<string | null>(null);
+
   // 键盘打开/切换证据后，待审阅区渲染完成再把焦点移入（鼠标点选不抢焦点）
   useEffect(() => {
     if (reviewFocusTick === 0) return;
     reviewRef.current?.focus();
   }, [reviewFocusTick]);
+
+  /**
+   * 把当前会话写入 IndexedDB 快照（基准/复检 PNG 字节 + 对比阶段 + 选中方位）。
+   * 存储不可用时静默失败，不影响核验流程。
+   */
+  const persistSession = (phase: 'awaiting' | 'compared', selected: ZoneId | null) => {
+    const baselinePng = baselinePngRef.current;
+    if (!baselinePng) return;
+    // 复检 PNG 字节缺失时降级为待复检快照，避免写出结构不完整的 compared 快照
+    const recheckPng = phase === 'compared' ? recheckPngRef.current : null;
+    const snapshot: SessionSnapshot = {
+      version: SESSION_SNAPSHOT_VERSION,
+      comparePhase: recheckPng ? 'compared' : 'awaiting',
+      selectedZone: selected,
+      baseline: { name: baselineNameRef.current, png: baselinePng },
+      recheck: recheckPng ? { name: recheckNameRef.current, png: recheckPng } : null,
+    };
+    void saveSessionSnapshot(snapshot);
+  };
+
+  // 页面加载时尝试恢复上一次会话：读取快照后重新走解码、取样与分析函数，
+  // 重建 Analysis / ZoneResult 与差异图，不直接信任旧判定。
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const load = await loadSessionSnapshot();
+      if (cancelled) return;
+      // 存储不可用或首次访问（无快照）：不提示，既有核验流程不受阻
+      if (load.status === 'unavailable' || load.status === 'empty') return;
+      if (load.status === 'invalid') {
+        // 版本或结构不识别（含缺图）：清理快照并说明无法恢复
+        await clearSessionSnapshot();
+        if (!cancelled) {
+          setRestoreFailure('快照版本或结构无法识别，已清理该快照，请重新上传图像。');
+        }
+        return;
+      }
+
+      const snapshot = load.snapshot;
+      const mySeq = requestSeq.current;
+      setRestoring(true);
+      /** 恢复失败：清理快照、说明无法恢复，随后允许正常上传 */
+      const failRestore = async (message: string) => {
+        await clearSessionSnapshot();
+        if (!cancelled) {
+          setRestoreFailure(message);
+          setRestoring(false);
+        }
+      };
+      /** 恢复期间操作员已发起新上传：放弃恢复，不打断新流程 */
+      const outdated = () => {
+        if (cancelled) return true;
+        if (mySeq !== requestSeq.current) {
+          setRestoring(false);
+          return true;
+        }
+        return false;
+      };
+
+      try {
+        const baselineFile = new File([snapshot.baseline.png], snapshot.baseline.name, {
+          type: 'image/png',
+        });
+        const baselineResult = await loadAnalyzedImage(baselineFile);
+        if (outdated()) return;
+        if (!baselineResult.ok) {
+          await failRestore(
+            `基准图像在恢复时未能通过${STAGE_LABEL[baselineResult.stage]}阶段（PNG 可能已损坏），已清理该快照，请重新上传图像。`,
+          );
+          return;
+        }
+
+        let restoredComparison: Comparison | null = null;
+        if (snapshot.comparePhase === 'compared') {
+          if (!snapshot.recheck) {
+            await failRestore('快照缺少复检图像，已清理该快照，请重新上传图像。');
+            return;
+          }
+          const recheckFile = new File([snapshot.recheck.png], snapshot.recheck.name, {
+            type: 'image/png',
+          });
+          const recheckResult = await loadAnalyzedImage(recheckFile);
+          if (outdated()) return;
+          if (!recheckResult.ok) {
+            await failRestore(
+              `复检图像在恢复时未能通过${STAGE_LABEL[recheckResult.stage]}阶段（PNG 可能已损坏），已清理该快照，请重新上传图像。`,
+            );
+            return;
+          }
+          restoredComparison = comparePixels(
+            baselineResult.pixels,
+            recheckResult.pixels,
+            IMAGE_SIZE,
+            IMAGE_SIZE,
+          );
+          recheckPngRef.current = snapshot.recheck.png;
+          recheckNameRef.current = snapshot.recheck.name;
+          setRecheckFileName(snapshot.recheck.name);
+          setRecheckPreviewUrl(URL.createObjectURL(recheckFile));
+        }
+
+        pixelsRef.current = baselineResult.pixels;
+        baselinePngRef.current = snapshot.baseline.png;
+        baselineNameRef.current = snapshot.baseline.name;
+        setFileName(snapshot.baseline.name);
+        setAnalysis(baselineResult.analysis);
+        setSelectedId(snapshot.selectedZone);
+        setComparison(restoredComparison);
+        setComparePhase(restoredComparison ? 'compared' : 'awaiting');
+        setPreviewUrl(URL.createObjectURL(baselineFile));
+        setRestoring(false);
+      } catch {
+        await failRestore('恢复已保存的会话时发生意外错误，已清理该快照，请重新上传图像。');
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // 仅在页面挂载时恢复一次
+  }, []);
 
   const clearResult = () => {
     setAnalysis(null);
@@ -309,12 +451,17 @@ export default function VerifyPage() {
       if (old) URL.revokeObjectURL(old);
       return null;
     });
+    // 旧会话快照一并作废；新基准分析成功后会写入新快照（同事务串行，覆盖生效）
+    baselinePngRef.current = null;
+    recheckPngRef.current = null;
+    void clearSessionSnapshot();
   };
 
   const handleFile = async (file: File) => {
     const seq = ++requestSeq.current;
     // 任何新上传都先清除旧结果（含上一次选区与裁片）
     clearResult();
+    setRestoreFailure(null);
     setFileName(file.name);
 
     const result = await loadAnalyzedImage(file);
@@ -323,11 +470,22 @@ export default function VerifyPage() {
       setError(result.error);
       return;
     }
+    // 保留原始 PNG 字节用于会话快照；读取失败仅意味着本次不保存，不影响判定
+    let pngBytes: ArrayBuffer | null = null;
+    try {
+      pngBytes = await file.arrayBuffer();
+    } catch {
+      pngBytes = null;
+    }
+    if (seq !== requestSeq.current) return;
     pixelsRef.current = result.pixels;
+    baselinePngRef.current = pngBytes;
+    baselineNameRef.current = file.name;
     setAnalysis(result.analysis);
     // 首张有效图完成检测后固定为基准，进入待复检阶段
     setComparePhase('awaiting');
     setPreviewUrl(URL.createObjectURL(file));
+    persistSession('awaiting', null);
   };
 
   /** 复检图上传：基准保持不变，只更新复检状态；失败指出原失败阶段 */
@@ -347,6 +505,9 @@ export default function VerifyPage() {
         if (old) URL.revokeObjectURL(old);
         return null;
       });
+      // 复检图被丢弃，会话快照回到仅含基准的待复检状态
+      recheckPngRef.current = null;
+      persistSession('awaiting', selectedId);
       setRecheckError({
         stage: result.stage,
         title: result.error.title,
@@ -355,6 +516,15 @@ export default function VerifyPage() {
       return;
     }
     if (!pixelsRef.current) return;
+    let pngBytes: ArrayBuffer | null = null;
+    try {
+      pngBytes = await file.arrayBuffer();
+    } catch {
+      pngBytes = null;
+    }
+    if (seq !== recheckSeq.current) return;
+    recheckPngRef.current = pngBytes;
+    recheckNameRef.current = file.name;
     setComparison(
       comparePixels(pixelsRef.current, result.pixels, IMAGE_SIZE, IMAGE_SIZE),
     );
@@ -363,6 +533,7 @@ export default function VerifyPage() {
       return URL.createObjectURL(file);
     });
     setComparePhase('compared');
+    persistSession('compared', selectedId);
   };
 
   /** 取消对比：丢弃复检图，回到固定基准的当前单图结果 */
@@ -376,6 +547,17 @@ export default function VerifyPage() {
       if (old) URL.revokeObjectURL(old);
       return null;
     });
+    recheckPngRef.current = null;
+    if (analysis) persistSession('awaiting', selectedId);
+  };
+
+  /** 清除已保存会话：删除 IndexedDB 快照并回到初始上传态 */
+  const clearSavedSession = () => {
+    // 使进行中的上传/恢复异步结果失效
+    requestSeq.current += 1;
+    clearResult();
+    setFileName('');
+    setRestoreFailure(null);
   };
 
   const missing = analysis?.zones.filter((z) => !z.present) ?? [];
@@ -383,7 +565,13 @@ export default function VerifyPage() {
   const selectedDiff = comparison?.zones.find((d) => d.zone.id === selectedId) ?? null;
 
   // 粘性选中：再次点选同一检测区保持选中，当前方位证据继续可见
-  const selectZone = (id: ZoneId) => setSelectedId(id);
+  const selectZone = (id: ZoneId) => {
+    setSelectedId(id);
+    // 选中方位随会话快照保存，刷新后恢复到同一方位的审阅
+    if (pixelsRef.current && comparePhase !== 'idle') {
+      persistSession(comparePhase === 'compared' ? 'compared' : 'awaiting', id);
+    }
+  };
 
   // 键盘打开证据：更新选区并请求在渲染完成后把焦点移入审阅区
   const openZoneFromKeyboard = (id: ZoneId) => {
@@ -403,6 +591,8 @@ export default function VerifyPage() {
         四区全部存在判定合格。采样基于原始像素，预览缩放不影响结果。首张有效图完成检测后固定为基准，
         可再上传一张同尺寸 PNG 作为复检图，按相同原始坐标逐像素对比调整前后的命中增减；
         点选任一检测卡片或预览框，可查看该区 32×32 原始像素裁片或复检差异图。
+        每次基准或复检分析成功后，当前会话（原始 PNG、对比阶段与选中方位）会自动保存在本浏览器内，
+        误刷新后自动恢复；点「清除已保存会话」可删除快照并回到初始上传态。
       </p>
 
       <div className="upload">
@@ -412,6 +602,7 @@ export default function VerifyPage() {
           data-testid="file-input"
           type="file"
           accept="image/png"
+          disabled={restoring}
           onChange={(e) => {
             const file = e.target.files?.[0];
             // 允许重复选择同一文件再次触发检测
@@ -420,7 +611,30 @@ export default function VerifyPage() {
           }}
         />
         {fileName && <span className="file-name">{fileName}</span>}
+        {analysis && (
+          <button
+            type="button"
+            className="session-clear"
+            data-testid="session-clear"
+            onClick={clearSavedSession}
+          >
+            清除已保存会话
+          </button>
+        )}
       </div>
+
+      {restoring && (
+        <div className="banner session-restoring" role="status" data-testid="session-restoring">
+          正在恢复已保存的会话…
+        </div>
+      )}
+
+      {restoreFailure && (
+        <div className="banner error" role="alert" data-testid="session-restore-failed">
+          <strong>无法恢复已保存的会话</strong>
+          <span>{restoreFailure}</span>
+        </div>
+      )}
 
       {error && (
         <div className="banner error" role="alert" data-testid="upload-error">
@@ -474,6 +688,7 @@ export default function VerifyPage() {
                     data-testid="recheck-input"
                     type="file"
                     accept="image/png"
+                    disabled={restoring}
                     onChange={(e) => {
                       const file = e.target.files?.[0];
                       e.target.value = '';
@@ -500,6 +715,7 @@ export default function VerifyPage() {
                     data-testid="recheck-input"
                     type="file"
                     accept="image/png"
+                    disabled={restoring}
                     onChange={(e) => {
                       const file = e.target.files?.[0];
                       e.target.value = '';
