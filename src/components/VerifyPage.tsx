@@ -537,8 +537,11 @@ export default function VerifyPage() {
           <div className="panels">
             {previewUrl && (
               <div className="preview" data-testid="preview">
-                <div className="preview-baseline">
-                  <img src={previewUrl} alt="待检图像预览" />
+                <div className="preview-baseline" data-testid="preview-baseline">
+                  <span className="preview-tag" data-testid="preview-tag-baseline">
+                    调整前（基准）
+                  </span>
+                  <img src={previewUrl} alt="调整前基准图像预览" />
                   {analysis.zones.map((z) => (
                     <div
                       key={z.zone.id}
@@ -572,15 +575,30 @@ export default function VerifyPage() {
                 </div>
                 {recheckPreviewUrl && comparison && (
                   <div className="preview-recheck" data-testid="preview-recheck">
+                    <span className="preview-tag" data-testid="preview-tag-recheck">
+                      复检结果
+                    </span>
                     <img src={recheckPreviewUrl} alt="复检图像预览" />
                     {comparison.recheck.zones.map((z) => (
                       <div
                         key={z.zone.id}
-                        aria-hidden="true"
-                        className={`zone-box static ${z.present ? 'present' : 'absent'} ${
+                        role="button"
+                        tabIndex={0}
+                        aria-label={`查看${z.zone.label}检测区复检前后 32×32 差异图`}
+                        aria-pressed={selectedId === z.zone.id}
+                        className={`zone-box ${z.present ? 'present' : 'absent'} ${
                           selectedId === z.zone.id ? 'selected' : ''
                         }`}
                         style={zoneBoxStyle(z.zone)}
+                        data-testid={`recheck-zone-box-${z.zone.id}`}
+                        title={`点选查看${z.zone.label}复检差异图`}
+                        onClick={() => selectZone(z.zone.id)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            openZoneFromKeyboard(z.zone.id);
+                          }
+                        }}
                       />
                     ))}
                   </div>
@@ -611,10 +629,13 @@ export default function VerifyPage() {
                   >
                     <header>
                       <span className="zone-label">{z.zone.label}</span>
-                      <span className="zone-status">{z.present ? '存在' : '缺失'}</span>
+                      <span className="zone-status" data-testid={`zone-${z.zone.id}-status`}>
+                        {diff ? `基准${z.present ? '存在' : '缺失'}` : z.present ? '存在' : '缺失'}
+                      </span>
                     </header>
                     <div className="zone-hits" data-testid={`zone-${z.zone.id}-hits`}>
-                      命中 {z.hits} / {z.total}
+                      {diff ? '基准命中 ' : '命中 '}
+                      {z.hits} / {z.total}
                     </div>
                     {!z.present && (
                       <div className="zone-reason" data-testid={`zone-${z.zone.id}-reason`}>
@@ -623,12 +644,20 @@ export default function VerifyPage() {
                     )}
                     {diff ? (
                       <div className="zone-diff" data-testid={`zone-${z.zone.id}-diff`}>
-                        <div
-                          className={`diff-delta ${diff.hitDelta > 0 ? 'up' : diff.hitDelta < 0 ? 'down' : ''}`}
-                          data-testid={`zone-${z.zone.id}-delta`}
-                        >
-                          命中{diff.hitDelta >= 0 ? '+' : ''}
-                          {diff.hitDelta}（{diff.recheck.hits} / {z.total}）
+                        <div className="zone-recheck-row">
+                          <span
+                            className={`zone-status ${diff.recheck.present ? 'is-present' : 'is-absent'}`}
+                            data-testid={`zone-${z.zone.id}-recheck-status`}
+                          >
+                            复检{diff.recheck.present ? '存在' : '缺失'}
+                          </span>
+                          <span
+                            className={`diff-delta ${diff.hitDelta > 0 ? 'up' : diff.hitDelta < 0 ? 'down' : ''}`}
+                            data-testid={`zone-${z.zone.id}-delta`}
+                          >
+                            命中{diff.hitDelta >= 0 ? '+' : ''}
+                            {diff.hitDelta}（{diff.recheck.hits} / {z.total}）
+                          </span>
                         </div>
                         <ul className="diff-counts">
                           <li data-testid={`zone-${z.zone.id}-recovered`}>

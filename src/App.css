@@ -415,6 +415,28 @@ h1 {
   outline-offset: 2px;
 }
 
+/* 预览图左上角信息标签：标明该预览为调整前基准还是复检结果 */
+.preview-tag {
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(31, 41, 51, 0.82);
+  color: #fff;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.preview-recheck .preview-tag {
+  background: rgba(3, 83, 136, 0.88);
+}
+
 /* 基准图与叠加框单独包一层定位容器：复检预览出现后叠加框仍相对基准图定位 */
 .preview-baseline {
   position: relative;
@@ -436,16 +458,29 @@ h1 {
   image-rendering: pixelated;
 }
 
-/* 复检预览上的检测框仅作展示，不响应点击（点选仍以基准层卡片/框为准） */
-.zone-box.static {
-  cursor: default;
-  pointer-events: none;
-}
-
 .zone-diff {
   margin-top: 8px;
   padding-top: 8px;
   border-top: 1px dashed #d9e2ec;
+}
+
+/* 复检判定行：复检存在/缺失徽标与命中增减并排，明确区分两次方位判定 */
+.zone-recheck-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.zone-status.is-present {
+  background: #def7ec;
+  color: #03543f;
+}
+
+.zone-status.is-absent {
+  background: #fde8e8;
+  color: #c81e1e;
 }
 
 .diff-delta {

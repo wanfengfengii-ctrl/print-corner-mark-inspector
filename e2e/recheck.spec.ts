@@ -162,6 +162,36 @@ test.describe('固定不合格基准 → 上传改善图 → 查看差异图 →
     await expect(page.getByTestId('zone-top-right-recovered')).toHaveText('恢复命中 205');
     await expect(page.getByTestId('zone-top-right-newgaps')).toHaveText('新增缺失 0');
 
+    // 方位卡片明确区分两次判定：右上基准缺失、复检存在（不合格基准 + 满命中复检）
+    await expect(page.getByTestId('zone-top-right-status')).toHaveText('基准缺失');
+    await expect(page.getByTestId('zone-top-right-recheck-status')).toHaveText('复检存在');
+    // 基准命中数带「基准」前缀，不与复检满命中混排
+    await expect(page.getByTestId('zone-top-right-hits')).toHaveText('基准命中 819 / 1024');
+    // 其余三区两次判定均为存在
+    for (const id of ['top-left', 'bottom-left', 'bottom-right'] as const) {
+      await expect(page.getByTestId(`zone-${id}-status`)).toHaveText('基准存在');
+      await expect(page.getByTestId(`zone-${id}-recheck-status`)).toHaveText('复检存在');
+    }
+
+    // 两张上下排列的预览图均有可见标识，可直接区分调整前基准与复检结果
+    const baselineTag = page.getByTestId('preview-tag-baseline');
+    const recheckTag = page.getByTestId('preview-tag-recheck');
+    await expect(baselineTag).toBeVisible();
+    await expect(baselineTag).toHaveText('调整前（基准）');
+    await expect(recheckTag).toBeVisible();
+    await expect(recheckTag).toHaveText('复检结果');
+    const baselineImg = page.locator('[data-testid="preview-baseline"] img');
+    const recheckImg = page.locator('[data-testid="preview-recheck"] img');
+    const baselineBox = await baselineImg.boundingBox();
+    const recheckBox = await recheckImg.boundingBox();
+    expect(baselineBox).not.toBeNull();
+    expect(recheckBox).not.toBeNull();
+    // 复检图排在基准图下方；标签分别落在各自预览范围内
+    expect(recheckBox!.y).toBeGreaterThan(baselineBox!.y + baselineBox!.height - 1);
+    const tagBox = await recheckTag.boundingBox();
+    expect(tagBox!.y).toBeGreaterThanOrEqual(recheckBox!.y - 1);
+    expect(tagBox!.y).toBeLessThanOrEqual(recheckBox!.y + 40);
+
     // 其余三区无变化
     for (const id of ['top-left', 'bottom-left', 'bottom-right'] as const) {
       await expect(page.getByTestId(`zone-${id}-delta`)).toHaveText('命中+0（1024 / 1024）');
@@ -219,6 +249,58 @@ test.describe('固定不合格基准 → 上传改善图 → 查看差异图 →
     expect(await diffColorCounts(page)).toEqual({ magenta: 1024, white: 0, green: 0, red: 0 });
   });
 
+  test('点选复检图上的右上检测框可切换方位并展示对应差异证据', async ({ page }) => {
+    await uploadBaseline(page, failingBaselinePng);
+    await uploadRecheck(page, improvedPng);
+
+    // 完成对比前未选方位，审阅区不出现
+    await expect(page.getByTestId('review')).toHaveCount(0);
+
+    // 复检图（下方第二张预览）上的右上检测框可点选，而非仅作静态展示
+    const recheckTrBox = page.getByTestId('recheck-zone-box-top-right');
+    await expect(recheckTrBox).toBeVisible();
+    await recheckTrBox.click();
+
+    const review = page.getByTestId('review');
+    await expect(review).toBeVisible();
+    await expect(review).toContainText('右上检测区 · 复检前后差异证据');
+    await expect(page.getByTestId('review-diff-crop')).toBeVisible();
+    await expect(page.getByTestId('review-diff-summary')).toHaveText(
+      '基准命中 819 → 复检命中 1024（增加 205）',
+    );
+    // 复检图与基准图上的右上框同步呈现选中态
+    await expect(recheckTrBox).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.getByTestId('zone-box-top-right')).toHaveAttribute('aria-pressed', 'true');
+
+    // 点选复检图上的左上框可切换方位
+    await page.getByTestId('recheck-zone-box-top-left').click();
+    await expect(review).toContainText('左上检测区 · 复检前后差异证据');
+    await expect(page.getByTestId('review-diff-summary')).toHaveText(
+      '基准命中 1024 → 复检命中 1024（无增减）',
+    );
+    await expect(page.getByTestId('recheck-zone-box-top-left')).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    await expect(page.getByTestId('recheck-zone-box-top-right')).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
+  });
+
+  test('键盘可操作复检图上的检测框，激活后焦点进入差异审阅区', async ({ page }) => {
+    await uploadBaseline(page, failingBaselinePng);
+    await uploadRecheck(page, improvedPng);
+
+    await page.getByTestId('recheck-zone-box-top-right').focus();
+    await page.keyboard.press('Enter');
+
+    const review = page.getByTestId('review');
+    await expect(review).toBeVisible();
+    await expect(review).toBeFocused();
+    await expect(review).toContainText('右上检测区 · 复检前后差异证据');
+  });
+
   test('取消对比后回到当前单图结果：复检内容移除、基准判定与缺口审阅仍可用', async ({
     page,
   }) => {
@@ -252,6 +334,33 @@ test.describe('固定不合格基准 → 上传改善图 → 查看差异图 →
     await expect(page.getByTestId('review-gap-bounds')).toHaveText(
       '缺口范围：无缺口（1024 个像素全部命中）',
     );
+  });
+});
+
+test.describe('复检恶化时方位卡片明确区分两次判定', () => {
+  test('基准满命中、复检右上缺口：右上卡片同时显示基准存在与复检缺失', async ({ page }) => {
+    await uploadBaseline(page, improvedPng);
+    await expect(page.getByTestId('verdict')).toContainText('合格');
+    await uploadRecheck(page, failingBaselinePng);
+
+    // 两次判定方向相反：基准合格、复检不合格
+    await expect(page.getByTestId('verdict-baseline')).toBeVisible();
+    const recheckVerdict = page.getByTestId('verdict-recheck');
+    await expect(recheckVerdict).toContainText('不合格');
+    await expect(recheckVerdict).toContainText('右上');
+
+    // 右上卡片：基准存在但复检缺失，命中数分别标注，不得只显示一个含糊的「缺失」
+    await expect(page.getByTestId('zone-top-right-status')).toHaveText('基准存在');
+    await expect(page.getByTestId('zone-top-right-hits')).toHaveText('基准命中 1024 / 1024');
+    await expect(page.getByTestId('zone-top-right-recheck-status')).toHaveText('复检缺失');
+    await expect(page.getByTestId('zone-top-right-delta')).toContainText('命中-205');
+    await expect(page.getByTestId('zone-top-right-newgaps')).toHaveText('新增缺失 205');
+    // 基准存在时不展示基准未达标原因
+    await expect(page.getByTestId('zone-top-right-reason')).toHaveCount(0);
+
+    // 未受影响的方位两次判定都为存在
+    await expect(page.getByTestId('zone-top-left-status')).toHaveText('基准存在');
+    await expect(page.getByTestId('zone-top-left-recheck-status')).toHaveText('复检存在');
   });
 });
 
