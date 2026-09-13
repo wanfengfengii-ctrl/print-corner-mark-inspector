@@ -1,9 +1,30 @@
-# 套准角标核验页
+# 扫描工位工作台
 
-纯前端页面，用于核验包装印刷图像四角的套准角标是否完整。操作员上传一张 PNG，
-浏览器原生解码后在四个固定检测区内统计品红命中像素，四区全部达标判定「合格」。
+纯前端工作台，包含两个相互独立的页面（顶部导航切换，两页均保持挂载、切换不卸载）：
 
-## 实现说明
+1. **套准角标核验**：核验包装印刷图像四角的套准角标是否完整。操作员上传一张 PNG，
+   浏览器原生解码后在四个固定检测区内统计品红命中像素，四区全部达标判定「合格」。
+2. **扫描照明校准**：工位开班前确认照明没有偏色或暗角。仅分析中性灰校准图，
+   不读取也不改写角标核验的任何结果。
+
+## 扫描照明校准
+
+- 操作员进入后选择一张恰为 1024×1024 的 PNG，异步分析服务依次执行
+  签名校验 → 浏览器原生解码（`createImageBitmap`）→ Canvas 原始像素取样，
+  再由纯计算构建 `CalibrationReport` 领域对象（`src/lib/calibration.ts`、
+  `src/lib/calibrationService.ts`）。
+- 图像固定划分为 8×8 个 128×128 方格，共 64 格，结果严格按固定格序返回
+  （先行后列，第 0 格为左上，第 63 格为右下）。
+- 像素亮度按 `0.2126R + 0.7152G + 0.0722B` 计算；报告包含：
+  各格平均亮度、全图 R/G/B 均值、全图平均亮度、最暗/最亮方格及亮度极差
+  （最大格均值 − 最小格均值）与结论文本。
+- 通过条件（同时满足）：全图三通道均值均处于闭区间 112–144，
+  且 64 格亮度极差不超过 12。任一不满足给出对应未通过项（偏色 / 暗角）。
+- 界面按「未选择 / 分析中 / 已完成 / 失败」四态呈现入口提示、上传区、
+  64 格亮度热力图与摘要；分析中禁止重复提交。格式、尺寸、解码或取样失败
+  会明确指出失败阶段并移除旧报告，再选有效图片即可恢复。
+
+## 套准角标核验
 
 - 技术栈：TypeScript + React + Vite，全部检测在浏览器内完成，无后端依赖。
 - 检测逻辑集中在 `src/lib/detect.ts`（纯函数，不依赖浏览器 API，便于单测）：
@@ -48,9 +69,9 @@ npm run preview
 ## 测试
 
 ```bash
-npm run test                          # Vitest：像素边界、检测区几何、820/819 阈值、区外不计数、缺口定位（单边/离散/无缺口）
+npm run test                          # Vitest：角标检测全部逻辑 + 照明校准（均匀灰/单格暗角/整体偏色、亮度公式、固定格序、边界阈值）
 npx playwright install chromium       # 首次运行端到端测试前安装浏览器
-npm run e2e                           # Playwright：合格/819 不合格/各类上传错误/清除旧结果/点选审阅裁片与切换选区
+npm run e2e                           # Playwright：角标核验全部验收 + 照明校准（通过报告、暗角热力图与结论、错误阶段提示、失败后重试、返回核验页状态保持）
 npm run verify                        # 依次运行以上全部
 ```
 
@@ -70,11 +91,17 @@ docker compose up --build --exit-code-from verify verify
 ## 目录结构
 
 ```
-src/lib/detect.ts      检测核心（检测区、命中条件、阈值、缺口包围范围与四边计数、PNG 签名校验）
-src/App.tsx            上传、解码、采样与结果展示
-src/test/detect.test.ts  Vitest 单元测试
-e2e/upload.spec.ts     Playwright 端到端测试
-e2e/helpers/png.ts     最小 PNG 编码器（生成真实测试图，走浏览器原生解码）
-Dockerfile             web（构建托管）与 verify（一次性验收）两个构建目标
-docker-compose.yml     WEB_PORT 端口覆盖与 verify 服务编排
+src/lib/detect.ts            角标检测核心（检测区、命中条件、阈值、缺口包围范围与四边计数、PNG 签名校验）
+src/lib/calibration.ts       照明校准领域对象 CalibrationReport 与纯计算（64 格均值、RGB 均值、极差、判定）
+src/lib/calibrationService.ts 异步分析服务（签名校验→原生解码→Canvas 取样→报告，失败带阶段标识）
+src/components/VerifyPage.tsx       套准角标核验页（保持挂载，切换工作台不丢失状态）
+src/components/CalibrationWorkbench.tsx 扫描照明校准工作台（四态、上传区、64 格热力图与摘要）
+src/App.tsx                  工作台切换外壳
+src/test/detect.test.ts      角标检测 Vitest 单元测试
+src/test/calibration.test.ts 照明校准 Vitest 单元测试（均匀灰/单格暗角/整体偏色）
+e2e/upload.spec.ts           角标核验 Playwright 端到端测试
+e2e/calibration.spec.ts      照明校准 Playwright 端到端测试
+e2e/helpers/png.ts           最小 PNG 编码器（生成真实测试图，走浏览器原生解码）
+Dockerfile                   web（构建托管）与 verify（一次性验收）两个构建目标
+docker-compose.yml           WEB_PORT 端口覆盖与 verify 服务编排
 ```

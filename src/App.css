@@ -18,6 +18,43 @@ body {
   padding: 24px 16px 48px;
 }
 
+/* 工作台切换导航 */
+.workbench-nav {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+  border-bottom: 1px solid #d9e2ec;
+  padding-bottom: 12px;
+}
+
+.workbench-nav button {
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  padding: 8px 16px;
+  border: 1px solid #cbd2d9;
+  border-radius: 8px;
+  background: #fff;
+  color: #3e4c59;
+  cursor: pointer;
+}
+
+.workbench-nav button:hover {
+  border-color: #2f80ed;
+}
+
+.workbench-nav button:focus-visible {
+  outline: 2px solid #2f80ed;
+  outline-offset: 2px;
+}
+
+.workbench-nav button.active {
+  background: #2f80ed;
+  border-color: #2f80ed;
+  color: #fff;
+}
+
 h1 {
   font-size: 24px;
   margin: 0 0 8px;
@@ -299,4 +336,116 @@ h1 {
   background: #f5f7fa;
   border-radius: 6px;
   padding: 8px 12px;
+}
+
+/* ===== 扫描照明校准工作台 ===== */
+
+.cal-status {
+  font-weight: 600;
+  font-size: 13px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: #e4e7eb;
+  color: #3e4c59;
+}
+
+.cal-progress {
+  font-size: 14px;
+  font-weight: 400;
+  background: #e6f6ff;
+  color: #035388;
+  border: 1px solid #7fd4f5;
+}
+
+.cal-entry {
+  border: 1px dashed #cbd2d9;
+  border-radius: 8px;
+  padding: 24px;
+  text-align: center;
+  color: #52606d;
+  background: #fff;
+}
+
+.cal-summary {
+  border: 1px solid #d9e2ec;
+  border-radius: 8px;
+  padding: 16px;
+  background: #fff;
+  margin-bottom: 16px;
+}
+
+.cal-summary h2,
+.cal-heatmap-wrap h2 {
+  font-size: 16px;
+  margin: 0 0 12px;
+}
+
+.cal-metrics {
+  list-style: none;
+  margin: 0 0 8px;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 8px;
+  font-variant-numeric: tabular-nums;
+  font-size: 14px;
+}
+
+.cal-metrics li {
+  background: #f5f7fa;
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+
+.cal-failures {
+  margin: 8px 0;
+  padding-left: 20px;
+  font-size: 13px;
+  color: #9b1c1c;
+}
+
+.cal-conclusion {
+  margin: 10px 0 0;
+  font-size: 14px;
+  line-height: 1.7;
+  color: #1f2933;
+}
+
+.cal-heatmap-wrap {
+  border: 1px solid #d9e2ec;
+  border-radius: 8px;
+  padding: 16px;
+  background: #fff;
+}
+
+.cal-heatmap {
+  display: grid;
+  gap: 2px;
+  /* 默认列数由组件内联指定；容器不超过内容宽度且窄屏可收缩 */
+  width: min(100%, 560px);
+}
+
+.cal-cell {
+  aspect-ratio: 1 / 1;
+  border-radius: 3px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+  /* 长数字在窄格内不撑破网格 */
+  min-width: 0;
+}
+
+.cal-cell-index {
+  font-size: 10px;
+  opacity: 0.75;
+}
+
+.cal-cell-luma {
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
 }
